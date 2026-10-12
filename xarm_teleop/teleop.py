@@ -10,7 +10,7 @@ import numpy as np
 
 from vr_support.core import RelativeTeleop, TeleopConfig, VRFrame, valid_transform
 from vr_support.oculus import AdbOculusSource
-from vr_support.runtime import load_yaml
+from vr_support.runtime import CONFIG_DIR, load_yaml
 from .client import ControlClient
 from .transport import DEFAULT_ENDPOINT
 
@@ -94,7 +94,7 @@ def main(argv=None):
     parser.add_argument("--arm", choices=("left", "right", "both"), default="right")
     parser.add_argument("--controller", choices=("auto", "left", "right"), default="auto",
                         help="Physical Quest controller for one selected robot arm; auto uses the available hand")
-    parser.add_argument("--vr-config", type=Path, default=Path(__file__).resolve().parents[2] / "xarm_controller/config/quest3.yaml")
+    parser.add_argument("--vr-config", type=Path, default=CONFIG_DIR / "quest3.yaml")
     parser.add_argument("--serial")
     parser.add_argument("--adb", default="adb")
     parser.add_argument("--no-launch", action="store_true", help="Read the app you opened manually; the app is still stopped on client exit")

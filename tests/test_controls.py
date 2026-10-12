@@ -3,7 +3,6 @@ from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from copy import deepcopy
 from dataclasses import replace
 import io
-from pathlib import Path
 import selectors
 import types
 import unittest
@@ -90,8 +89,13 @@ class TeleopControlsTests(unittest.TestCase):
         client = client or FakeClient(["left", "right"] if arm == "both" else [arm])
         source = source or Mock(wraps=FakeSource(frames))
         source.error = None
-        cfg = Path(__file__).resolve().parents[2] / "xarm_controller/config/quest3.yaml"
+        # Operator gain tuning must not change the geometry expected by these tests.
+        config = {"defaults": {"translation_scale": 0.5}, "arms": {
+            "left": {"controller": "l", "move_button": "LG", "gripper_button": "LTr", "episode_button": "Y"},
+            "right": {"controller": "r", "move_button": "RG", "gripper_button": "RTr", "episode_button": "B"},
+        }}
         with ExitStack() as stack:
+            stack.enter_context(patch.object(teleop, "load_yaml", return_value=config))
             stack.enter_context(patch.object(teleop, "ControlClient", return_value=client))
             stack.enter_context(patch.object(teleop, "AdbOculusSource", return_value=source))
             stack.enter_context(patch.object(teleop.time, "monotonic", clock or Mock(return_value=100.0)))
@@ -100,10 +104,10 @@ class TeleopControlsTests(unittest.TestCase):
             stack.enter_context(redirect_stderr(io.StringIO()))
             if expect_failure:
                 with self.assertRaises(SystemExit) as error:
-                    teleop.main(["--arm", arm, "--vr-config", str(cfg), "--no-launch"])
+                    teleop.main(["--arm", arm, "--no-launch"])
                 self.assertEqual(error.exception.code, 1)
             else:
-                teleop.main(["--arm", arm, "--vr-config", str(cfg), "--no-launch"])
+                teleop.main(["--arm", arm, "--no-launch"])
         source.close.assert_called_once_with(stop_app=True)
         return client
 

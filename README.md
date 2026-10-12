@@ -54,10 +54,10 @@ Expected layout:
 
 ```text
 onrobotrl/
-  xarm_controller/
-  xarm_ros2/
-  xarm_teleop/       ← this project
   manipulation_env/
+    manipulation_ws/src/xarm_ros2/
+      xarm_ros2/xarm_controller/  ← shared controller source
+  xarm_teleop/       ← this project
 ```
 
 From this folder:
@@ -67,8 +67,9 @@ uv sync --locked
 ```
 
 This creates `.venv`. The checked-in lock uses Python 3.11, MuJoCo 3.8.0,
-Gymnasium 1.2.3, NumPy, SciPy, PyYAML, Pillow, and h5py. `xarm_controller` is an
-editable sibling dependency. The simulation uses the xArm XML and meshes from
+Gymnasium 1.2.3, NumPy, SciPy, PyYAML, Pillow, and h5py. The `xarm_controller`
+source inside `manipulation_env` is an editable dependency shared with its ROS
+nodes. Edit the controller there. The simulation uses the xArm XML and meshes from
 `gym-xarm`; it has its own Python environment wrapper. Asset source notes and
 the license are in [`assets/gym_xarm`](xarm_teleop/assets/gym_xarm/README.md).
 
@@ -166,7 +167,7 @@ an EGL driver is available. Use `--no-images` when no graphics backend is presen
 
 The Quest must run an Oculus Reader APK. It is not included in this project.
 Enable developer mode, authorize USB debugging, and install the Quest 3 APK.
-See the [headset setup guide](../xarm_controller/vr_support/README.md), including
+See the [headset setup guide](../manipulation_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/vr_support/README.md), including
 the tracking-flag defect found in the current Quest 3 fork and its required fix.
 
 ```bash
@@ -253,7 +254,7 @@ offset; it cannot remove later headset motion. Verify tracking without wearing
 the headset before enabling a physical robot.
 
 Change buttons, scale, gripper behavior, and each arm's axis mapping in
-[`quest3.yaml`](../xarm_controller/config/quest3.yaml), or pass `--vr-config PATH`.
+[`quest3.yaml`](../manipulation_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/config/quest3.yaml), or pass `--vr-config PATH`.
 Use `--arm left`, `right`, or `both`. With both selected, each grip independently
 enables its arm. `--no-gripper` disables gripper commands from the client.
 For arm-only ROS operation, also pass `--no-gripper` to the server.
@@ -329,7 +330,7 @@ session explicitly; stopping a recording does not leave motion running between f
 
 ## Linux: connect to xarm_ros2
 
-Use the updated node in the sibling `xarm_ros2` repo. It adds:
+Use the node in `manipulation_env/manipulation_ws/src/xarm_ros2`. It provides:
 
 - Empty `ScheduledCmd.cmd` to cancel queued motion on the same command topic.
 - `xarm_start_control` and `xarm_stop_control` Trigger services.
@@ -345,11 +346,10 @@ Build in your existing ROS workspace, or from a new build folder:
 
 ```bash
 # From onrobotrl; use the shell/interpreter where your existing xArm ROS node runs.
-export XARM_CONTROLLER_PATH="$PWD/xarm_controller"
 source /opt/ros/humble/setup.bash
 mkdir -p ros_ws
 cd ros_ws
-colcon build --base-paths ../xarm_ros2/xarm_ctrl_msgs ../xarm_ros2/xarm_ros2 \
+colcon build --base-paths ../manipulation_env/manipulation_ws/src/xarm_ros2 \
   --packages-select xarm_ctrl_msgs xarm_ros2 --symlink-install
 source install/setup.bash
 ```
@@ -527,11 +527,12 @@ resending old motion simply to defeat the timeout.
 | `server.py` | Control ownership, freshness checks, stepping, episode lifetime |
 | `teleop.py` | Quest input to the shared relative-motion policy |
 | `recording.py` | Observation/action pairing and HDF5 writes |
-| `../xarm_controller/vr_support/core.py` | Per-arm button state and taring |
+| `../manipulation_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/vr_support/core.py` | Per-arm button state and taring |
 
 ```bash
 uv run python -m unittest discover -s tests -v
-uv run python -m unittest discover -s ../xarm_controller/tests -v
+uv run python -m unittest discover \
+  -s ../manipulation_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/tests -v
 ```
 
 Set `XARM_TEST_RENDER=1` and run the tests with `mjpython` in a desktop session

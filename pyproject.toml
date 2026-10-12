@@ -31,4 +31,4 @@ include = ["xarm_teleop*"]
 xarm_teleop = ["assets/gym_xarm/*.xml", "assets/gym_xarm/LICENSE", "assets/gym_xarm/*.md", "assets/gym_xarm/mesh/*.stl"]
 
 [tool.uv.sources]
-xarm-controller = {path = "../xarm_controller", editable = true}
+xarm-controller = {path = "../manipulation_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller", editable = true}

@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 
 from vr_support.core import TeleopCommand, finite_vector
+from vr_support.runtime import CONFIG_DIR
 from .backends import RealBackend, SimBackend
 from .recording import EpisodeRecorder
 from .ros_backend import RosBackend
@@ -314,8 +315,8 @@ def main(argv=None):
     parser.add_argument("--no-images", action="store_true")
     parser.add_argument("--no-gripper", action="store_true")
     parser.add_argument("--execute", action="store_true", help="Required for the real robot backend")
-    parser.add_argument("--robot-config", type=Path, default=Path(__file__).resolve().parents[2] / "xarm_controller/config/roamlab.yaml")
-    parser.add_argument("--vr-config", type=Path, default=Path(__file__).resolve().parents[2] / "xarm_controller/config/quest3.yaml")
+    parser.add_argument("--robot-config", type=Path, default=CONFIG_DIR / "roamlab.yaml")
+    parser.add_argument("--vr-config", type=Path, default=CONFIG_DIR / "quest3.yaml")
     parser.add_argument("--episodes", type=Path, default=Path("episodes"))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--episode-steps", type=int, help="Optional simulation step limit; interactive teleop has no limit by default")

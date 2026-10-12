@@ -20,6 +20,7 @@ from xarm_teleop.server import ControlService
 from xarm_teleop.transport import Connection, RemoteError, SocketServer, decode, encode
 from xarm_teleop.teleop import bind_controller, choose_controller
 from vr_support.core import TeleopConfig, RelativeTeleop, VRFrame
+from vr_support.runtime import CONFIG_DIR
 
 
 class ControllerBindingTests(unittest.TestCase):
@@ -440,7 +441,7 @@ class RosContractTests(unittest.TestCase):
     def test_actual_node_callbacks_accept_holds_and_reject_nan(self):
         # Load only these methods so tests exercise the real node code without
         # importing ROS binaries or opening a physical xArm connection.
-        path = Path(__file__).resolve().parents[2] / "xarm_ros2/xarm_ros2/xarm_ros2/xarm_scheduled_node.py"
+        path = CONFIG_DIR.parents[1] / "xarm_ros2/xarm_scheduled_node.py"
         tree = ast.parse(path.read_text())
         node_class = next(n for n in tree.body if isinstance(n, ast.ClassDef))
         selected = [n for n in node_class.body if isinstance(n, ast.FunctionDef)
@@ -461,7 +462,7 @@ class RosContractTests(unittest.TestCase):
         self.assertEqual(calls, ["arm hold", "gripper hold"])
 
     def test_start_refuses_a_tcp_outside_workspace(self):
-        path = Path(__file__).resolve().parents[2] / "xarm_ros2/xarm_ros2/xarm_ros2/xarm_scheduled_node.py"
+        path = CONFIG_DIR.parents[1] / "xarm_ros2/xarm_scheduled_node.py"
         tree = ast.parse(path.read_text())
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
         method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "start_callback")

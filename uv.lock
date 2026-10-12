@@ -235,7 +235,7 @@ wheels = [
 [[package]]
 name = "xarm-controller"
 version = "0.1.0"
-source = { editable = "../xarm_controller" }
+source = { editable = "../manipulation_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller" }
 dependencies = [
     { name = "numpy" },
     { name = "pyyaml" },
@@ -273,7 +273,7 @@ requires-dist = [
     { name = "pillow", specifier = "==11.3.0" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "scipy", specifier = "==1.17.1" },
-    { name = "xarm-controller", editable = "../xarm_controller" },
+    { name = "xarm-controller", editable = "../manipulation_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller" },
 ]
 
 [[package]]
