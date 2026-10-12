@@ -50,25 +50,40 @@ recovery, and explicit episode resets. Keep transport and robot fault handling.
 
 ## Install the uv environment
 
-Expected layout:
+Choose any parent folder and place the repositories beside each other with
+these directory names. The parent folder can have any name or location.
 
 ```text
-onrobotrl/
-  manipulation_env/
+workspace/                       # any parent folder
+  onrobot_rl_env/
     manipulation_ws/src/xarm_ros2/
       xarm_ros2/xarm_controller/  ← shared controller source
-  xarm_teleop/       ← this project
+  xarm_teleop/                    ← this project
+  oculus_reader/                  # optional: patched Quest APK source
 ```
 
-From this folder:
+From your chosen parent folder:
 
 ```bash
+git clone https://github.com/roamlab/onrobot_rl_env.git onrobot_rl_env
+git clone https://github.com/r-rishabh-j/quest_teleop.git xarm_teleop
+cd xarm_teleop
 uv sync --locked
 ```
 
+If the repositories are already present, arrange them as shown, enter
+`xarm_teleop`, and run `uv sync --locked`. The local dependency uses
+`../onrobot_rl_env/...`; no machine-specific absolute path is required.
+The xArm source is included in the environment repository, so this setup does
+not require a separate `xarm_ros2` or `xarm_controller` checkout.
+
+Run the following commands from **`xarm_teleop` in each terminal**, unless a
+section explicitly changes directories. The optional `oculus_reader` folder
+is needed only for the local APK build guide, not for `uv sync`.
+
 This creates `.venv`. The checked-in lock uses Python 3.11, MuJoCo 3.8.0,
 Gymnasium 1.2.3, NumPy, SciPy, PyYAML, Pillow, and h5py. The `xarm_controller`
-source inside `manipulation_env` is an editable dependency shared with its ROS
+source inside `onrobot_rl_env` is an editable dependency shared with its ROS
 nodes. Edit the controller there. The simulation uses the xArm XML and meshes from
 `gym-xarm`; it has its own Python environment wrapper. Asset source notes and
 the license are in [`assets/gym_xarm`](xarm_teleop/assets/gym_xarm/README.md).
@@ -100,7 +115,6 @@ The built file is `OculusTeleop-debug.apk`, not the bundled beta APK.
 3. Start the simulation in Terminal 1:
 
 ```bash
-cd /Users/rishabh/development/onrobotrl/xarm_teleop
 uv run xarm-server --backend sim --arm right --viewer
 ```
 
@@ -110,7 +124,6 @@ shared-library path needed by uv-managed Python. On Linux it uses normal Python.
 4. Start the real Quest input in Terminal 2:
 
 ```bash
-cd /Users/rishabh/development/onrobotrl/xarm_teleop
 uv run xarm-vr --arm right --controller auto --show-input
 ```
 
@@ -167,7 +180,7 @@ an EGL driver is available. Use `--no-images` when no graphics backend is presen
 
 The Quest must run an Oculus Reader APK. It is not included in this project.
 Enable developer mode, authorize USB debugging, and install the Quest 3 APK.
-See the [headset setup guide](../manipulation_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/vr_support/README.md), including
+See the [headset setup guide](../onrobot_rl_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/vr_support/README.md), including
 the tracking-flag defect found in the current Quest 3 fork and its required fix.
 
 ```bash
@@ -254,7 +267,7 @@ offset; it cannot remove later headset motion. Verify tracking without wearing
 the headset before enabling a physical robot.
 
 Change buttons, scale, gripper behavior, and each arm's axis mapping in
-[`quest3.yaml`](../manipulation_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/config/quest3.yaml), or pass `--vr-config PATH`.
+[`quest3.yaml`](../onrobot_rl_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/config/quest3.yaml), or pass `--vr-config PATH`.
 Use `--arm left`, `right`, or `both`. With both selected, each grip independently
 enables its arm. `--no-gripper` disables gripper commands from the client.
 For arm-only ROS operation, also pass `--no-gripper` to the server.
@@ -330,7 +343,7 @@ session explicitly; stopping a recording does not leave motion running between f
 
 ## Linux: connect to xarm_ros2
 
-Use the node in `manipulation_env/manipulation_ws/src/xarm_ros2`. It provides:
+Use the node in `onrobot_rl_env/manipulation_ws/src/xarm_ros2`. It provides:
 
 - Empty `ScheduledCmd.cmd` to cancel queued motion on the same command topic.
 - `xarm_start_control` and `xarm_stop_control` Trigger services.
@@ -342,26 +355,29 @@ The bridge requires this status protocol. It will not silently use an older node
 without the hold and timeout behavior.
 Use one command producer per ROS arm; stop other teleop or policy publishers.
 
-Build in your existing ROS workspace, or from a new build folder:
+From `xarm_teleop`, build the xArm packages in the environment's ROS workspace:
 
 ```bash
-# From onrobotrl; use the shell/interpreter where your existing xArm ROS node runs.
 source /opt/ros/humble/setup.bash
-mkdir -p ros_ws
-cd ros_ws
-colcon build --base-paths ../manipulation_env/manipulation_ws/src/xarm_ros2 \
-  --packages-select xarm_ctrl_msgs xarm_ros2 --symlink-install
+cd ../onrobot_rl_env/manipulation_ws
+colcon build --packages-select xarm_ctrl_msgs xarm_ros2 --symlink-install
 source install/setup.bash
+cd ../../xarm_teleop
 ```
 
 The ROS node's Python environment needs the xArm SDK, NumPy, and SciPy, as in the
 existing xarm_ros2 setup. Installing them in the simulator venv alone does not
 install them in the ROS environment.
 
-Run each selected node in its own sourced terminal. Adjust IP, payload, TCP
-offset, and workspace to match the physical arm:
+Run each selected node in its own terminal, starting in `xarm_teleop`. Source
+ROS and the workspace in each terminal, then run the required node. Adjust IP,
+payload, TCP offset, and workspace bounds to match the physical arm:
 
 ```bash
+source /opt/ros/humble/setup.bash
+source ../onrobot_rl_env/manipulation_ws/install/setup.bash
+
+# Run one node per terminal.
 ros2 run xarm_ros2 xarm_scheduled_node --ros-args \
   -r __node:=xarm_right -p arm_name:=right_arm -p xarm_ip:=192.168.1.225 \
   -p enable_gripper:=true -p enable_keyboard:=false \
@@ -373,12 +389,12 @@ ros2 run xarm_ros2 xarm_scheduled_node --ros-args \
   -p max_vel_m_s:=0.1 -p max_ang_vel_rad_s:=0.6
 ```
 
-In the server terminal, source ROS and the built workspace before starting uv:
+In the server terminal, start in `xarm_teleop` and source ROS and the workspace
+before starting uv:
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /path/to/onrobotrl/ros_ws/install/setup.bash
-cd /path/to/onrobotrl/xarm_teleop
+source ../onrobot_rl_env/manipulation_ws/install/setup.bash
 uv run xarm-server --backend ros --arm both --execute --ros-python /usr/bin/python3
 ```
 
@@ -527,20 +543,19 @@ resending old motion simply to defeat the timeout.
 | `server.py` | Control ownership, freshness checks, stepping, episode lifetime |
 | `teleop.py` | Quest input to the shared relative-motion policy |
 | `recording.py` | Observation/action pairing and HDF5 writes |
-| `../manipulation_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/vr_support/core.py` | Per-arm button state and taring |
+| `../onrobot_rl_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/vr_support/core.py` | Per-arm button state and taring |
 
 ```bash
 uv run python -m unittest discover -s tests -v
 uv run python -m unittest discover \
-  -s ../manipulation_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/tests -v
+  -s ../onrobot_rl_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/tests -v
 ```
 
 Set `XARM_TEST_RENDER=1` and run the tests with `mjpython` in a desktop session
-to include the RGB test. State-only physics, a scripted cube lift, command
-validation, ownership, timeout, recording, and ROS message conversion were
-tested here. This tool session cannot open listening sockets or macOS graphics,
-so the live socket and RGB tests remain unverified here. ROS runtime and physical
-Quest/xArm tests also require the target machines.
+to include the RGB test. Tests cover state-only physics, a scripted cube lift,
+command validation, ownership, timeouts, recording, and ROS message conversion.
+The live socket test skips if the operating environment blocks listening sockets.
+Test ROS runtime behavior and physical xArm control on the target Linux machine.
 
 The simulator uses a mocap weld, not calibrated motor dynamics. Workspace and
 speed limits do not provide collision avoidance. Button release and timeouts
