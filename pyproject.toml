@@ -1,0 +1,34 @@
+[project]
+name = "xarm-teleop"
+version = "0.1.0"
+description = "ROS-free Quest teleoperation, xArm simulation server, and demonstration recorder"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "xarm-controller",
+  "numpy==2.4.3",
+  "scipy==1.17.1",
+  "PyYAML==6.0.3",
+  "mujoco==3.8.0",
+  "gymnasium==1.2.3",
+  "h5py==3.16.0",
+  "Pillow==11.3.0",
+]
+
+[project.scripts]
+xarm-server = "xarm_teleop.launch:server"
+xarm-vr = "xarm_teleop.teleop:main"
+xarm-client = "xarm_teleop.client:main"
+
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["xarm_teleop*"]
+
+[tool.setuptools.package-data]
+xarm_teleop = ["assets/gym_xarm/*.xml", "assets/gym_xarm/LICENSE", "assets/gym_xarm/*.md", "assets/gym_xarm/mesh/*.stl"]
+
+[tool.uv.sources]
+xarm-controller = {path = "../xarm_controller", editable = true}
