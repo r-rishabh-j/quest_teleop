@@ -1,4 +1,4 @@
-"""The server is the sole owner of simulation or robot connections."""
+"""Simulation backend: the server is the sole owner of the MuJoCo scenes."""
 from __future__ import annotations
 
 import time
@@ -6,7 +6,6 @@ import time
 import numpy as np
 
 from vr_support.core import TeleopCommand
-from vr_support.runtime import LiveRobot, load_yaml, make_settings
 
 
 def state_vector(state):
@@ -114,94 +113,3 @@ class SimBackend:
         for env in self.envs.values():
             env.close()
 
-
-class RealBackend:
-    kind = "real"
-
-    def __init__(self, names, robot_config, vr_config, no_gripper=False):
-        self.names = tuple(names)
-        self.control, settings = make_settings(load_yaml(robot_config), load_yaml(vr_config), names,
-                                              no_gripper=no_gripper)
-        self.dt = 1 / self.control["rate_hz"]
-        self.robots = {}
-        self.targets = {}
-        self.active = {name: [False, False] for name in names}
-        self.frame_id = 0
-        self.done = dict.fromkeys(names, False)
-        try:
-            for name, (policy, kwargs, pose) in settings.items():
-                self.robots[name] = LiveRobot(policy, kwargs, pose, self.control)
-                actual, grip = self.robots[name].state()
-                self.targets[name] = np.r_[actual, grip if grip is not None else 0.0]
-        except BaseException:
-            self.close()
-            raise
-
-    def describe(self):
-        return {"backend": self.kind, "arms": list(self.names), "dt": self.dt,
-                "action": "absolute TCP pose: meters + rotvec radians; gripper: pulse [0,850]",
-                "rotation": True, "shared_bimanual_scene": True, "cameras": []}
-
-    def snapshot(self):
-        result = {}
-        for name, robot in self.robots.items():
-            pose, grip = robot.state()
-            joints = robot.arm.get_actual_joint_positions()
-            if joints is None or len(joints) != 7 or not np.isfinite(joints).all():
-                raise RuntimeError("xArm-7 joint feedback is unavailable")
-            result[name] = {"tcp_pose": pose, "joint_positions": joints,
-                            "gripper": float(grip if grip is not None else 0),
-                            "timestamp": time.time(), "sim_time": 0.0,
-                            "reward": 0.0, "done": False, "success": False}
-        return result
-
-    def cameras(self):
-        return {}  # Add a timestamped camera source here for physical RGB recording.
-
-    def apply(self, commands):
-        for name, robot in self.robots.items():
-            command = commands.get(name, TeleopCommand(hold_arm=True, hold_gripper=True))
-            if command.hold_arm:
-                robot.arm.hold_current_pose()
-                self.targets[name][:6] = robot.arm.get_current_target_pose()
-                self.active[name][0] = False
-            if command.hold_gripper:
-                if robot.gripper:
-                    robot.gripper.hold_current_position()
-                    self.targets[name][6] = robot.gripper.get_current_target_gripper()
-                self.active[name][1] = False
-            if command.pose is not None:
-                self.targets[name][:6] = command.pose
-                self.active[name][0] = True
-            if command.gripper is not None:
-                self.targets[name][6] = command.gripper
-                self.active[name][1] = True
-
-    def tick(self):
-        for name, robot in self.robots.items():
-            robot.state()  # Check faults even while held.
-            robot.apply(TeleopCommand(pose=self.targets[name][:6] if self.active[name][0] else None,
-                                      gripper=self.targets[name][6] if self.active[name][1] else None),
-                        self.control["duration_s"])
-        self.frame_id += 1
-
-    def actions(self):
-        applied = {}
-        for name, robot in self.robots.items():
-            pose = robot.arm.get_current_target_pose()
-            grip = robot.gripper.get_current_target_gripper() if robot.gripper else 0.0
-            applied[name] = np.r_[pose, grip]
-        return {name: value.copy() for name, value in self.targets.items()}, applied
-
-    def hold(self):
-        self.apply({})
-
-    def reset(self, seed=0):
-        raise ValueError("Automatic reset is disabled for real robots")
-
-    def close(self):
-        for name, robot in reversed(list(self.robots.items())):
-            try:
-                robot.close()
-            except Exception as exc:
-                print(f"[{name}] cleanup failed: {exc}")

@@ -1,4 +1,8 @@
-"""Single-owner socket control server. Simulation and GL run on the server thread."""
+"""Simulation server for the VR link: one owner, MuJoCo and GL on the server thread.
+
+The real robot is driven by manipulation_env's QuestAgent (onrobot_rl_env), which
+serves the same protocol; this server is for practice and offline testing.
+"""
 from __future__ import annotations
 
 import argparse
@@ -17,10 +21,8 @@ from PIL import Image
 
 from vr_support.link import (DEFAULT_ENDPOINT, PROTOCOL_VERSION, SocketServer, is_loopback,
                              parse_actions, parse_buttons, parse_events)
-from vr_support.runtime import CONFIG_DIR
-from .backends import RealBackend, SimBackend
+from .backends import SimBackend
 from .recording import EpisodeRecorder
-from .ros_backend import RosBackend
 
 
 class ControlService:
@@ -41,7 +43,6 @@ class ControlService:
         self.last_stop = None
         self._ended_lease = None
         self._ended_owner = None
-        self.backend_stopped = False
         self.reset_seed = reset_seed
         self.record_args = None  # (task, metadata) while the client records
 
@@ -50,9 +51,7 @@ class ControlService:
 
     def _ended_reply(self):
         reason = self.last_stop["reason"]
-        if self.backend_stopped:
-            recovery = "Restart the server and client explicitly; release controls before moving."
-        elif reason in ("task complete", "simulation time limit"):
+        if reason in ("task complete", "simulation time limit"):
             recovery = "Reset the simulation, then restart the client."
         else:
             recovery = "Release the controls, then restart the client."
@@ -141,11 +140,9 @@ class ControlService:
         return {**self.backend.describe(), "protocol_version": PROTOCOL_VERSION,
                 "command_timeout_s": self.timeout, "recording": self.recorder.file is not None,
                 "control_claimed": self.lease is not None, "last_episode": self.last_episode,
-                "last_stop": self.last_stop, "backend_stopped": self.backend_stopped}
+                "last_stop": self.last_stop}
 
     def claim(self):
-        if self.backend_stopped:
-            raise ValueError("Physical robot streams are stopped. Restart the server explicitly before a new session")
         if self.lease is not None:
             raise ValueError("Another client owns control")
         if any(self.backend.done.values()):
@@ -199,8 +196,6 @@ class ControlService:
             commands = parse_actions(payload["actions"], self.backend.names)
             events = parse_events(payload.get("events", []))
             parse_buttons(payload.get("buttons", {}))  # validated only; the simulator does not log them
-            if "episode" in events and self.backend.kind != "sim":
-                raise ValueError("Episode reset is simulation-only; reset physical robots manually")
             self.backend.apply(commands)
             self.sequence = sequence
             self.source_sequence = source_sequence
@@ -228,14 +223,11 @@ class ControlService:
         return {"reset": True, "previous_episode": previous, "episode": episode}
 
     def tick(self):
-        if self.backend_stopped:
-            return
         if self.lease is not None and time.monotonic() > self.deadline:
             self.stop("command timeout")
             return
-        # Waiting for the Quest must not consume a simulation episode's step
-        # budget. Physical backends still tick to check feedback and faults.
-        if self.backend.kind == "sim" and self.lease is None:
+        # Waiting for the Quest must not consume a simulation episode's step budget.
+        if self.lease is None:
             self.state = self.backend.snapshot()
             self.state_at = time.monotonic()
             return
@@ -260,13 +252,7 @@ class ControlService:
         self.owner = None
         self.record_args = None
         try:
-            if self.backend.kind == "sim":
-                self.backend.hold()
-            elif not self.backend_stopped:
-                # A lost client must stop the physical arm and gripper streams,
-                # not just leave servo threads waiting for another client.
-                self.backend_stopped = True
-                self.backend.close()
+            self.backend.hold()
         finally:
             path = self.recorder.stop(success, reason)
             if path:
@@ -281,55 +267,34 @@ class ControlService:
         try:
             self.stop("server shutdown")
         finally:
-            if not self.backend_stopped:
-                self.backend.close()
+            self.backend.close()
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=("sim", "real", "ros"), default="sim")
     parser.add_argument("--arm", choices=("left", "right", "both"), default="right")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     parser.add_argument("--viewer", action="store_true", help="Open a MuJoCo window (use mjpython on macOS)")
     parser.add_argument("--view-arm", choices=("left", "right"), help="Scene shown when controlling two simulated arms")
     parser.add_argument("--no-images", action="store_true")
-    parser.add_argument("--no-gripper", action="store_true")
-    parser.add_argument("--execute", action="store_true", help="Required for the real robot backend")
-    parser.add_argument("--robot-config", type=Path, default=CONFIG_DIR / "roamlab.yaml")
-    parser.add_argument("--vr-config", type=Path, default=CONFIG_DIR / "quest3.yaml")
     parser.add_argument("--episodes", type=Path, default=Path("episodes"))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--episode-steps", type=int, help="Optional simulation step limit; interactive teleop has no limit by default")
     parser.add_argument("--stop-on-success", action="store_true", help="End simulation control when the lift task succeeds")
-    parser.add_argument("--ros-python", default="/usr/bin/python3", help="Python that can import the sourced ROS installation")
-    parser.add_argument("--ros-left-name", default="left_arm")
-    parser.add_argument("--ros-right-name", default="right_arm")
     parser.add_argument("--seconds", type=float, help="Optional run duration for smoke tests")
     args = parser.parse_args(argv)
     token = os.environ.get("XARM_TELEOP_TOKEN")
     if not is_loopback(args.endpoint) and not token:
         parser.error("Set XARM_TELEOP_TOKEN before binding to a network interface")
-    if args.backend in ("real", "ros") and not args.execute:
-        parser.error("A physical robot backend requires --execute")
-    if args.viewer and args.backend != "sim":
-        parser.error("--viewer requires --backend sim")
     if args.seconds is not None and (not np.isfinite(args.seconds) or args.seconds <= 0):
         parser.error("--seconds must be finite and positive")
     if args.episode_steps is not None and args.episode_steps <= 0:
         parser.error("--episode-steps must be positive")
-    if args.backend != "sim" and (args.episode_steps is not None or args.stop_on_success):
-        parser.error("Episode step/success limits apply only to --backend sim")
     names = ("left", "right") if args.arm == "both" else (args.arm,)
     if args.view_arm and args.view_arm not in names:
         parser.error("--view-arm must be one of the selected arms")
-    if args.backend == "sim":
-        backend = SimBackend(names, not args.no_images, args.seed,
-                             max_steps=args.episode_steps, stop_on_success=args.stop_on_success)
-    elif args.backend == "ros":
-        mapping = {name: getattr(args, f"ros_{name}_name") for name in names}
-        backend = RosBackend(names, args.ros_python, args.no_gripper, mapping)
-    else:
-        backend = RealBackend(names, args.robot_config, args.vr_config, args.no_gripper)
+    backend = SimBackend(names, not args.no_images, args.seed,
+                         max_steps=args.episode_steps, stop_on_success=args.stop_on_success)
     try:
         service = ControlService(backend, args.episodes, reset_seed=args.seed)
     except BaseException:
@@ -350,7 +315,7 @@ def main(argv=None):
             import mujoco.viewer
             env = backend.envs[args.view_arm or names[0]]
             viewer = mujoco.viewer.launch_passive(env.model, env.data)
-        print(f"{args.backend} server: {args.endpoint} arms={','.join(names)}", flush=True)
+        print(f"sim server: {args.endpoint} arms={','.join(names)}", flush=True)
         print("Control is idle until a client claims it. Ctrl+C stops the server.", flush=True)
         started = next_tick = time.monotonic()
         while not stopped and (args.seconds is None or time.monotonic() - started < args.seconds):

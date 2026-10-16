@@ -1,28 +1,24 @@
 # xArm teleoperation and simulation
 
-Use a Quest 3 over **USB**, test in Gymnasium/MuJoCo, and record demonstrations.
-The server can control the left arm, the right arm, or both.
+Use a Quest 3 over **USB** to drive the xArm, either in a Gymnasium/MuJoCo
+simulator (this repo) or on the real arms through `onrobot_rl_env`. The client
+can control the left arm, the right arm, or both.
 
 ```text
 Quest 3 + Oculus Reader APK
           │ USB / ADB
           ▼
-      xarm-vr client                 learned policy / replay
-          │                                  │
-          └──── persistent Unix socket ───────┘
-                      │
-                 xarm-server
-                 ├─ sim  → Gymnasium + MuJoCo 3
-                 ├─ ros  → ROS system-Python bridge → xarm_ros2 → xarm_controller
-                 └─ real → xarm_controller SDK directly
-                      │
-                 HDF5 episodes
+      xarm-vr client            (taring, scaling, axis and button mapping)
+          │ VR link: length-prefixed JSON (vr_support/link.py)
+          ├─ unix socket ─► xarm-server (sim) → MuJoCo 3 → HDF5 episodes
+          └─ tcp 8765 ────► run_env QuestAgent (onrobot_rl_env, ROS container)
+                              → xarm_scheduled_node → xArm; data via DataCollector
 ```
 
-The default local transport is a Unix socket. It uses small JSON messages with
-a four-byte length prefix over one persistent connection. There is no HTTP or
-ZeroMQ dependency. For separate computers, use `tcp://HOST:PORT` over wired
-Ethernet or an SSH tunnel. The Quest can stay attached to the client by USB.
+The VR link uses small JSON messages with a four-byte length prefix over one
+persistent connection. The simulator listens on a Unix socket; run_env's Quest
+agent on `tcp://127.0.0.1:8765` (the ROS container uses host networking). For
+the real robot, see [docs/TELEOP_SETUP.md](docs/TELEOP_SETUP.md).
 
 ## Working baseline and next cleanup
 
@@ -40,8 +36,8 @@ Keep the approach small:
 - Missing poses or samples older than 0.25 seconds hold all selected arms and
   grippers. Keep the client and episode open. Re-tare on the first fresh input,
   without a recovery timer or replaying movement from the gap.
-- Keep input handling separate from the robot server. Use the same socket API
-  for MuJoCo on macOS/Linux and the ROS bridge on Linux.
+- Keep input handling separate from the robot side. Use the same VR link for
+  the MuJoCo simulator and for run_env's Quest agent on the real arms.
 
 Next cleanup: consolidate input validation and hold/re-tare handling; remove
 duplicate checks, superseded workarounds, and unused APK demo features. Preserve
@@ -88,9 +84,8 @@ nodes. Edit the controller there. The simulation uses the xArm XML and meshes fr
 `gym-xarm`; it has its own Python environment wrapper. Asset source notes and
 the license are in [`assets/gym_xarm`](xarm_teleop/assets/gym_xarm/README.md).
 
-ROS is optional. The main uv environment does not import `rclpy`. On Linux, the
-ROS bridge runs under the interpreter supplied by `--ros-python`, normally
-`/usr/bin/python3`. Thus ROS Humble can keep its Python 3.10 environment.
+The uv environment does not use ROS. The real arms are driven from the ROS
+container in `onrobot_rl_env`; this repo only runs the Quest client for them.
 
 ## Mac: start the simulator
 
@@ -115,7 +110,7 @@ The built file is `OculusTeleop-debug.apk`, not the bundled beta APK.
 3. Start the simulation in Terminal 1:
 
 ```bash
-uv run xarm-server --backend sim --arm right --viewer
+uv run xarm-server --arm right --viewer
 ```
 
 `xarm-server` launches **mjpython on macOS**. The launcher also sets the Python
@@ -154,7 +149,7 @@ The demo moves the arm a short distance and closes/reopens the gripper. To selec
 
 ```bash
 # Terminal 1
-uv run xarm-server --backend sim --arm both --viewer
+uv run xarm-server --arm both --viewer
 
 # Terminal 2
 uv run xarm-vr --demo --arm both --seconds 5
@@ -169,7 +164,7 @@ to choose it. Both scenes continue to run and record.
 For a state-only test without graphics:
 
 ```bash
-uv run python -m xarm_teleop.server --backend sim --no-images
+uv run python -m xarm_teleop.server --no-images
 uv run xarm-client smoke --seconds 3 --record
 ```
 
@@ -270,7 +265,6 @@ Change buttons, scale, gripper behavior, and each arm's axis mapping in
 [`quest3.yaml`](../onrobot_rl_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/config/quest3.yaml), or pass `--vr-config PATH`.
 Use `--arm left`, `right`, or `both`. With both selected, each grip independently
 enables its arm. `--no-gripper` disables gripper commands from the client.
-For arm-only ROS operation, also pass `--no-gripper` to the server.
 
 ## Stops and episode boundaries
 
@@ -321,11 +315,6 @@ For a bounded evaluation, opt in with `--episode-steps 3000` and/or
 start the next episode automatically. Direct Gymnasium use keeps its normal
 termination/truncation behavior.
 
-On physical `ros`/`real` backends, ending control closes the bridge/SDK streams.
-Restart the server explicitly before another control session. B/Y reset is
-simulation-only; it cannot reset a physical robot. Calling it on a physical
-backend stops control and reports an error.
-
 The server now reports the actual stop reason, such as `command timeout` or
 `simulation time limit`. Cleanup after an ended session is safe and repeatable.
 The old misleading `Lease belongs to another connection` error is fixed for
@@ -341,105 +330,18 @@ scene. That run will not record RGB images.
 The Python API's `stop_recording()` also ends control. Start the next control
 session explicitly; stopping a recording does not leave motion running between files.
 
-## Linux: connect to xarm_ros2
+## Real robot
 
-Use the node in `onrobot_rl_env/manipulation_ws/src/xarm_ros2`. It provides:
-
-- Empty `ScheduledCmd.cmd` to cancel queued motion on the same command topic.
-- `xarm_start_control` and `xarm_stop_control` Trigger services.
-- `xarm_control_status` feedback with running/error/timeout state.
-- A 0.3-second timeout in each scheduled controller.
-- `enable_keyboard:=false` for a server without a desktop keyboard.
-
-The bridge requires this status protocol. It will not silently use an older node
-without the hold and timeout behavior.
-Use one command producer per ROS arm; stop other teleop or policy publishers.
-
-From `xarm_teleop`, build the xArm packages in the environment's ROS workspace:
-
-```bash
-source /opt/ros/humble/setup.bash
-cd ../onrobot_rl_env/manipulation_ws
-colcon build --packages-select xarm_ctrl_msgs xarm_ros2 --symlink-install
-source install/setup.bash
-cd ../../xarm_teleop
-```
-
-The ROS node's Python environment needs the xArm SDK, NumPy, and SciPy, as in the
-existing xarm_ros2 setup. Installing them in the simulator venv alone does not
-install them in the ROS environment.
-
-Run each selected node in its own terminal, starting in `xarm_teleop`. Source
-ROS and the workspace in each terminal, then run the required node. Adjust IP,
-payload, TCP offset, and workspace bounds to match the physical arm:
-
-```bash
-source /opt/ros/humble/setup.bash
-source ../onrobot_rl_env/manipulation_ws/install/setup.bash
-
-# Run one node per terminal.
-ros2 run xarm_ros2 xarm_scheduled_node --ros-args \
-  -r __node:=xarm_right -p arm_name:=right_arm -p xarm_ip:=192.168.1.225 \
-  -p enable_gripper:=true -p enable_keyboard:=false \
-  -p max_vel_m_s:=0.1 -p max_ang_vel_rad_s:=0.6
-
-ros2 run xarm_ros2 xarm_scheduled_node --ros-args \
-  -r __node:=xarm_left -p arm_name:=left_arm -p xarm_ip:=192.168.1.220 \
-  -p enable_gripper:=true -p enable_keyboard:=false \
-  -p max_vel_m_s:=0.1 -p max_ang_vel_rad_s:=0.6
-```
-
-In the server terminal, start in `xarm_teleop` and source ROS and the workspace
-before starting uv:
-
-```bash
-source /opt/ros/humble/setup.bash
-source ../onrobot_rl_env/manipulation_ws/install/setup.bash
-uv run xarm-server --backend ros --arm both --execute --ros-python /usr/bin/python3
-```
-
-The bridge calls the start services and waits for valid feedback. It does not
-move to an initial pose. The Quest client also requires explicit live control:
-
-```bash
-uv run xarm-vr --arm both --execute --show-input
-```
-
-Namespaces default to `left_arm` and `right_arm`. Change them with
-`--ros-left-name` and `--ros-right-name`. Pose commands go to
-`/{arm_name}/xarm_command_pose`; gripper commands go to
-`/{arm_name}/xarm_command_gripper`. Feedback uses `xarm_state` and
-`xarm_gripper_state` under the same namespace.
-
-The optional `--backend real` uses the Python xArm SDK directly, including on a
-Mac. Install that extra dependency with `uv add xarm-python-sdk==1.17.3`, and use
-`--execute`. The preferred Linux path above uses ROS nodes.
-
-## Put the server on another computer
-
-For an SSH tunnel, keep the server bound to loopback on Linux:
-
-```bash
-uv run xarm-server --backend ros --arm both --execute --endpoint tcp://127.0.0.1:8765
-```
-
-On the Mac:
-
-```bash
-ssh -N -L 8765:127.0.0.1:8765 linux-host
-# Another terminal; Quest remains connected to the Mac by USB.
-uv run xarm-vr --server tcp://127.0.0.1:8765 --arm both --execute
-```
-
-For a direct trusted-LAN connection, bind the server to `tcp://0.0.0.0:8765` and
-set the same `XARM_TELEOP_TOKEN` on server and client. The direct TCP transport is
-not encrypted. The command timeout requires a low-latency connection.
+The real arms are driven by `run_env`'s Quest agent in `onrobot_rl_env`, not by
+`xarm-server`. Start the arm node and run_env there, then `./run_robot.sh` here.
+[docs/TELEOP_SETUP.md](docs/TELEOP_SETUP.md) has the full guide. On the robot,
+B/Y sends an `episode` event to run_env instead of resetting a simulation.
 
 ## Record demonstrations
 
 ```bash
 # Server: choose the output directory.
-uv run xarm-server --backend sim --arm right --viewer --episodes ./episodes
+uv run xarm-server --arm right --viewer --episodes ./episodes
 
 # Client: B saves the current episode, resets the scene, and starts the next.
 uv run xarm-vr --arm right --controller auto --record --task "Pick up the cube" --show-input
@@ -472,11 +374,8 @@ The file also stores sample times, per-arm observation times, simulated time,
 source sequence, software versions, selected arms, and the VR configuration.
 Images belong to the observation **before** the corresponding action.
 
-The ROS backend currently records robot state and commands; real camera topics
-are not connected yet. Its `applied` arm pose comes from command feedback; its
-gripper value is measured position. For behavior cloning on ROS data, use
-`requested` as the intended action label. Keep timestamps: ROS feedback and
-physical motion are asynchronous.
+These HDF5 files come from the simulator only. Real-robot demonstrations are
+recorded by run_env's DataCollector in `onrobot_rl_env`.
 
 Read an episode without a training-framework dependency:
 
@@ -537,8 +436,7 @@ resending old motion simply to defeat the timeout.
 | File | Responsibility |
 |---|---|
 | `env.py` | Gym task, frame conversion, gripper control, MuJoCo stepping |
-| `backends.py` | Simulation and direct SDK adapters |
-| `ros_backend.py`, `ros_bridge.py` | ROS process boundary and topic adapter |
+| `backends.py` | Simulation adapter for the server |
 | `../onrobot_rl_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/vr_support/link.py` | VR link protocol: framing, `ControlClient`, request validation, and the `LinkSession` used by manipulation_env's QuestAgent |
 | `server.py` | Control ownership, freshness checks, stepping, episode lifetime |
 | `teleop.py` | Quest input to the shared relative-motion policy |
@@ -553,9 +451,9 @@ uv run python -m unittest discover \
 
 Set `XARM_TEST_RENDER=1` and run the tests with `mjpython` in a desktop session
 to include the RGB test. Tests cover state-only physics, a scripted cube lift,
-command validation, ownership, timeouts, recording, and ROS message conversion.
-The live socket test skips if the operating environment blocks listening sockets.
-Test ROS runtime behavior and physical xArm control on the target Linux machine.
+command validation, ownership, timeouts, recording, and the xArm node's hold and
+workspace callbacks. The live socket test skips if listening sockets are blocked.
+Test physical xArm control through `onrobot_rl_env` on the robot machine.
 
 The simulator uses a mocap weld, not calibrated motor dynamics. Workspace and
 speed limits do not provide collision avoidance. Button release and timeouts

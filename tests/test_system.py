@@ -15,7 +15,6 @@ from scipy.spatial.transform import Rotation
 from xarm_teleop.backends import SimBackend
 from xarm_teleop.client import ControlClient
 from xarm_teleop.env import XArmLiftEnv
-from xarm_teleop.ros_bridge import pose_vector
 from xarm_teleop.server import ControlService
 from vr_support.link import Connection, RemoteError, SocketServer, decode, encode
 from xarm_teleop.teleop import bind_controller, choose_controller
@@ -262,40 +261,6 @@ class ServiceTests(unittest.TestCase):
             self.assertFalse(rejected["ok"])
             reset.assert_not_called()
 
-    def test_physical_timeout_closes_backend_and_requires_manual_restart(self):
-        # This is the physical-backend contract; no SDK/ROS connection is opened.
-        physical = types.SimpleNamespace(kind="ros", done={"left": False, "right": False},
-            snapshot=lambda: {}, hold=lambda: None, describe=lambda: {"backend": "ros"},
-            close=unittest.mock.Mock(), tick=unittest.mock.Mock())
-        service = ControlService(physical, self.temp.name)
-        peer = object()
-        lease = service.dispatch(peer, {"op": "claim"})["result"]["lease"]
-        service.deadline = time.monotonic() - 1
-        service.tick()
-        service.tick()
-        physical.close.assert_called_once()
-        physical.tick.assert_not_called()
-        self.assertFalse(service.dispatch(peer, {"op": "claim"})["ok"])
-        self.assertEqual(service.dispatch(peer, {"op": "stop", "lease": lease})["result"]["reason"], "command timeout")
-        service.close()
-        physical.close.assert_called_once()
-
-    def test_b_reset_never_resets_a_physical_backend(self):
-        physical = types.SimpleNamespace(kind="ros", done={"right": False}, names=("right",), frame_id=0,
-            snapshot=lambda: {}, hold=lambda: None, describe=lambda: {"backend": "ros"},
-            close=unittest.mock.Mock(), reset=unittest.mock.Mock(), apply=unittest.mock.Mock())
-        service = ControlService(physical, self.temp.name)
-        peer = object()
-        lease = service.dispatch(peer, {"op": "claim"})["result"]["lease"]
-        ticket = service.dispatch(peer, {"op": "observation", "lease": lease})["result"]["ticket"]
-        result = service.dispatch(peer, {"op": "command", "lease": lease, "data": {
-            "ticket": ticket, "sequence": 0, "actions": {}, "events": ["episode"]}})
-        self.assertFalse(result["ok"])
-        self.assertIn("simulation-only", result["error"])
-        physical.reset.assert_not_called()
-        physical.close.assert_called_once()
-        service.close()
-
     def test_client_keeps_its_lease_across_an_episode_event(self):
         self.call("stop")
         peer = object()
@@ -416,7 +381,7 @@ class TransportTests(unittest.TestCase):
         while not stop.is_set():
             server.poll(0.01)
 
-    def test_ros_backend_requires_explicit_execute(self):
+    def test_robot_backend_requires_explicit_execute(self):
         client = ControlClient()
         client.health = lambda: {"backend": "ros"}
         with self.assertRaises(ValueError):
@@ -437,11 +402,6 @@ class TransportTests(unittest.TestCase):
 
 
 class RosContractTests(unittest.TestCase):
-    def test_ros_quaternion_and_joint_payload_are_distinct(self):
-        pose = types.SimpleNamespace(position=types.SimpleNamespace(x=0.4, y=0, z=0.3),
-            orientation=types.SimpleNamespace(x=0, y=1, z=0, w=0))
-        np.testing.assert_allclose(pose_vector(pose), [0.4, 0, 0.3, 0, np.pi, 0])
-
     def test_actual_node_callbacks_accept_holds_and_reject_nan(self):
         # Load only these methods so tests exercise the real node code without
         # importing ROS binaries or opening a physical xArm connection.

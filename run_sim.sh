@@ -50,7 +50,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "[run] starting simulator (arm=$arm); log: $PWD/$log"
-uv run xarm-server --backend sim --arm "$arm" --viewer >"$log" 2>&1 &
+uv run xarm-server --arm "$arm" --viewer >"$log" 2>&1 &
 server_pid=$!
 
 for _ in $(seq 60); do
