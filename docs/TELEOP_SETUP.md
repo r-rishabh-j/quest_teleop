@@ -239,7 +239,7 @@ The status JSON shows `arm_running`, `gripper_running` and `error`.
 - The arm node speed is 0.1 m/s in the commands above; raise it once the setup
   is trusted.
 - Policy deployment: a policy process can drive the same server through
-  `ControlClient` in [client.py](quest_teleop/xarm_teleop/client.py)
+  `ControlClient` in [vr_support/link.py](onrobot_rl_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/vr_support/link.py)
   (`claim`, `observation`, `command`). Not tried yet.
 
 ## 10. Further reading

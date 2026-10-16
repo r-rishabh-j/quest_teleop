@@ -15,14 +15,12 @@ import time
 import numpy as np
 from PIL import Image
 
-from vr_support.core import TeleopCommand, finite_vector
+from vr_support.link import (DEFAULT_ENDPOINT, PROTOCOL_VERSION, SocketServer, is_loopback,
+                             parse_actions, parse_buttons, parse_events)
 from vr_support.runtime import CONFIG_DIR
 from .backends import RealBackend, SimBackend
 from .recording import EpisodeRecorder
 from .ros_backend import RosBackend
-
-
-from .transport import DEFAULT_ENDPOINT, SocketServer, address
 
 
 class ControlService:
@@ -45,6 +43,7 @@ class ControlService:
         self._ended_owner = None
         self.backend_stopped = False
         self.reset_seed = reset_seed
+        self.record_args = None  # (task, metadata) while the client records
 
     def _is_ended_session(self, peer, lease):
         return lease is not None and lease == self._ended_lease and peer is self._ended_owner
@@ -113,9 +112,8 @@ class ControlService:
                 result = self.observation()
             elif op == "episode/start":
                 self.require_lease(lease)
-                result = {"episode": self.recorder.start(self.describe(), str(payload.get("task", "")), payload.get("metadata"))}
-            elif op == "episode/new":
-                result = self.new_episode(peer, lease, payload)
+                self.record_args = (str(payload.get("task", "")), payload.get("metadata"))
+                result = {"episode": self.recorder.start(self.describe(), *self.record_args)}
             elif op == "episode/stop":
                 self.require_lease(lease)
                 if type(payload.get("success", False)) is not bool:
@@ -140,7 +138,7 @@ class ControlService:
             self.owner = None
 
     def describe(self):
-        return {**self.backend.describe(), "protocol_version": 1,
+        return {**self.backend.describe(), "protocol_version": PROTOCOL_VERSION,
                 "command_timeout_s": self.timeout, "recording": self.recorder.file is not None,
                 "control_claimed": self.lease is not None, "last_episode": self.last_episode,
                 "last_stop": self.last_stop, "backend_stopped": self.backend_stopped}
@@ -169,7 +167,8 @@ class ControlService:
             raise ValueError("Control lease expired; reconnect and release the buttons")
 
     def observation(self, lease=None):
-        result = {"frame_id": self.backend.frame_id, "arms": self.state}
+        # The simulator executes every accepted command, so it is always enabled.
+        result = {"frame_id": self.backend.frame_id, "arms": self.state, "enabled": True, "status": ""}
         if lease:
             self.require_lease(lease)
             if time.monotonic() - self.state_at > self.timeout:
@@ -197,28 +196,11 @@ class ControlService:
                 time.monotonic() - self.ticket_time + source_age > self.timeout
             ):
                 raise ValueError("Command input or observation is too old")
-            actions = payload["actions"]
-            if not isinstance(actions, dict) or set(actions) - set(self.backend.names):
-                raise ValueError("Unknown arm or invalid action mapping")
-            commands = {}
-            for name, action in actions.items():
-                if not isinstance(action, dict) or set(action) - {"pose", "gripper", "hold_arm", "hold_gripper"}:
-                    raise ValueError("Unknown action field")
-                pose = action.get("pose")
-                if pose is not None:
-                    pose = finite_vector(pose, 6, "command pose")
-                grip = action.get("gripper")
-                if grip is not None and (not np.isfinite(grip) or not 0 <= grip <= 850):
-                    raise ValueError("Gripper must be in [0,850] pulses")
-                for key in ("hold_arm", "hold_gripper"):
-                    if key in action and type(action[key]) is not bool:
-                        raise ValueError("Hold flags must be boolean")
-                if (action.get("hold_arm", False) and pose is not None) or (
-                    action.get("hold_gripper", False) and grip is not None
-                ):
-                    raise ValueError("A command cannot hold and move the same actuator")
-                commands[name] = TeleopCommand(pose=pose, gripper=grip,
-                    hold_arm=action.get("hold_arm", False), hold_gripper=action.get("hold_gripper", False))
+            commands = parse_actions(payload["actions"], self.backend.names)
+            events = parse_events(payload.get("events", []))
+            parse_buttons(payload.get("buttons", {}))  # validated only; the simulator does not log them
+            if "episode" in events and self.backend.kind != "sim":
+                raise ValueError("Episode reset is simulation-only; reset physical robots manually")
             self.backend.apply(commands)
             self.sequence = sequence
             self.source_sequence = source_sequence
@@ -226,27 +208,24 @@ class ControlService:
         except (ValueError, KeyError, TypeError, OverflowError):
             self.stop("invalid command")
             raise
-        return {"accepted": sequence, "frame_id": self.backend.frame_id}
+        # Events ride on a command, so a delayed or replayed press is rejected
+        # by the same ticket and sequence checks as motion.
+        results = {name: self.episode_event() if name == "episode" else "ignored" for name in events}
+        return {"accepted": sequence, "frame_id": self.backend.frame_id, "events": results}
 
-    def new_episode(self, peer, lease, payload):
-        self.require_lease(lease)
-        if self.backend.kind != "sim":
-            raise ValueError("Episode reset is simulation-only; reset physical robots manually")
-        if type(payload.get("record", False)) is not bool:
-            raise ValueError("record must be boolean")
-        # Consume a fresh observation ticket and first hold every arm. A delayed
-        # or replayed B press must not reset the scene or start a new recording.
-        self.command(lease, {"ticket": payload["ticket"], "sequence": payload["sequence"],
-                            "source_age_s": payload.get("source_age_s", 0),
-                            "source_sequence": payload.get("source_sequence", -1), "actions": {}})
-        finished = self.stop("operator reset", success=all(s["success"] for s in self.state.values()))
+    def episode_event(self):
+        """B/Y: finish the recording, reset the scene, and keep the same control session."""
+        previous = self.recorder.stop(all(s["success"] for s in self.state.values()), "operator reset")
+        if previous:
+            self.last_episode = previous
         self.backend.reset(seed=self.reset_seed)
-        result = self.claim()
-        self.owner = peer
+        self.backend.hold()
+        self.state = self.backend.snapshot()
+        self.state_at = time.monotonic()
         episode = None
-        if payload.get("record"):
-            episode = self.recorder.start(self.describe(), str(payload.get("task", "")), payload.get("metadata"))
-        return {**result, "episode": episode, "previous_episode": finished["episode"]}
+        if self.record_args is not None:
+            episode = self.recorder.start(self.describe(), *self.record_args)
+        return {"reset": True, "previous_episode": previous, "episode": episode}
 
     def tick(self):
         if self.backend_stopped:
@@ -279,6 +258,7 @@ class ControlService:
         ended_lease, ended_owner = self.lease, self.owner
         self.lease = self.ticket = None
         self.owner = None
+        self.record_args = None
         try:
             if self.backend.kind == "sim":
                 self.backend.hold()
@@ -327,8 +307,7 @@ def main(argv=None):
     parser.add_argument("--seconds", type=float, help="Optional run duration for smoke tests")
     args = parser.parse_args(argv)
     token = os.environ.get("XARM_TELEOP_TOKEN")
-    _, dest = address(args.endpoint)
-    if isinstance(dest, tuple) and dest[0] not in ("localhost", "127.0.0.1") and not token:
+    if not is_loopback(args.endpoint) and not token:
         parser.error("Set XARM_TELEOP_TOKEN before binding to a network interface")
     if args.backend in ("real", "ros") and not args.execute:
         parser.error("A physical robot backend requires --execute")

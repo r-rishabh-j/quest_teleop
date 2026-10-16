@@ -513,7 +513,7 @@ The network API uses gripper pulses in `[0,850]` to match `xarm_controller`.
 The simulation adapter converts pulses to opening fractions.
 
 ```python
-from xarm_teleop.client import ControlClient
+from vr_support.link import ControlClient
 
 client = ControlClient()  # or endpoint="tcp://127.0.0.1:8765"
 client.claim()           # allow_real=True is required for physical backends
@@ -539,7 +539,7 @@ resending old motion simply to defeat the timeout.
 | `env.py` | Gym task, frame conversion, gripper control, MuJoCo stepping |
 | `backends.py` | Simulation and direct SDK adapters |
 | `ros_backend.py`, `ros_bridge.py` | ROS process boundary and topic adapter |
-| `transport.py` | Persistent IPC/TCP framing and bounded buffers |
+| `../onrobot_rl_env/manipulation_ws/src/xarm_ros2/xarm_ros2/xarm_controller/vr_support/link.py` | VR link protocol: framing, `ControlClient`, request validation, and the `LinkSession` used by manipulation_env's QuestAgent |
 | `server.py` | Control ownership, freshness checks, stepping, episode lifetime |
 | `teleop.py` | Quest input to the shared relative-motion policy |
 | `recording.py` | Observation/action pairing and HDF5 writes |

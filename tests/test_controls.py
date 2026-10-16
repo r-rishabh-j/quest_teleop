@@ -13,8 +13,7 @@ import numpy as np
 from vr_support.core import RelativeTeleop, TeleopConfig, VRFrame
 from vr_support.oculus import LogDecoder
 from xarm_teleop import teleop
-from xarm_teleop.client import ControlClient
-from xarm_teleop.transport import Peer, RemoteError, SocketServer, encode
+from vr_support.link import ControlClient, Peer, RemoteError, SocketServer, encode
 
 POSE = [0.4, 0.0, 0.3, 0.0, 3.14, 0.0]
 
@@ -30,9 +29,10 @@ def vr_frame(sequence, grip=0, trigger=0, episode=0, hands=("r",), x=0):
 class FakeClient:
     def __init__(self, names):
         self.names = names
-        self.commands, self.resets, self.stops = [], [], []
+        self.commands, self.resets, self.stops, self.buttons = [], [], [], []
         self.pose = list(POSE)
         self.lease = None
+        self.enabled = True
 
     def health(self):
         return {"backend": "sim", "arms": self.names, "dt": 0.02}
@@ -42,15 +42,18 @@ class FakeClient:
         return self.health()
 
     def observation(self):
-        return {"ticket": "test", "arms": {name: {"tcp_pose": self.pose, "gripper": 850} for name in self.names}}
+        enabled = self.enabled() if callable(self.enabled) else self.enabled
+        return {"ticket": "test", "enabled": enabled, "status": "" if enabled else "agent inactive",
+                "arms": {name: {"tcp_pose": self.pose, "gripper": 850} for name in self.names}}
 
-    def command(self, obs, actions, *args):
+    def command(self, obs, actions, *args, events=(), buttons=None):
         self.commands.append(deepcopy(actions))
-
-    def new_episode(self, *args, **kwargs):
-        self.resets.append(len(self.commands))
-        self.pose = list(POSE)
-        return {"episode": None}
+        self.buttons.append(buttons)
+        if "episode" in events:
+            # Like the simulator: an episode event resets the scene.
+            self.resets.append(len(self.commands) - 1)
+            self.pose = list(POSE)
+        return {"events": {name: {} for name in events}}
 
     def stop(self, **kwargs):
         self.stops.append(kwargs)
@@ -172,13 +175,29 @@ class TeleopControlsTests(unittest.TestCase):
             vr_frame(5, grip=1, trigger=1), vr_frame(6),
             vr_frame(7, grip=1, trigger=1),
         ])
-        self.assertEqual(len(client.resets), 1)
-        held = client.commands[2]["right"]
-        self.assertTrue(held["hold_arm"] and held["hold_gripper"])
-        self.assertIsNone(client.commands[3]["right"]["pose"])
-        self.assertIsNone(client.commands[3]["right"]["gripper"])
-        np.testing.assert_allclose(client.commands[5]["right"]["pose"], POSE)
-        self.assertEqual(client.commands[5]["right"]["gripper"], 0)
+        # The event rides on a hold of every arm; holding B keeps holding.
+        self.assertEqual(client.resets, [2])
+        for index in (2, 3):
+            held = client.commands[index]["right"]
+            self.assertTrue(held["hold_arm"] and held["hold_gripper"])
+        self.assertIsNone(client.commands[4]["right"]["pose"])
+        self.assertIsNone(client.commands[4]["right"]["gripper"])
+        np.testing.assert_allclose(client.commands[6]["right"]["pose"], POSE)
+        self.assertEqual(client.commands[6]["right"]["gripper"], 0)
+        self.assertEqual(client.buttons[2]["B"], 1)
+
+    def test_disabled_robot_side_holds_then_retares_without_jumping(self):
+        client = FakeClient(["right"])
+        enabled = iter([True, True, False, False, True, True])
+        client.enabled = lambda: next(enabled, True)
+        self.run_frames([vr_frame(1), vr_frame(2, grip=1), vr_frame(3, grip=1, x=0.5),
+                         vr_frame(4, grip=1, x=1.0), vr_frame(5, grip=1, x=1.0),
+                         vr_frame(6, grip=1, x=1.1)], client=client)
+        for index in (2, 3):
+            self.assertEqual(client.commands[index]["right"], {"hold_arm": True, "hold_gripper": True})
+        # On resume the held grip re-tares at the current TCP: no jump to x=1.0.
+        np.testing.assert_allclose(client.commands[4]["right"]["pose"], POSE)
+        np.testing.assert_allclose(client.commands[5]["right"]["pose"][1], POSE[1] - 0.5 * 0.1, atol=1e-9)
 
     def test_b_already_held_at_start_does_not_reset(self):
         client = self.run_frames([vr_frame(1, episode=1), vr_frame(2, episode=1), vr_frame(3)])

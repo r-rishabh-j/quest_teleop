@@ -17,7 +17,7 @@ from xarm_teleop.client import ControlClient
 from xarm_teleop.env import XArmLiftEnv
 from xarm_teleop.ros_bridge import pose_vector
 from xarm_teleop.server import ControlService
-from xarm_teleop.transport import Connection, RemoteError, SocketServer, decode, encode
+from vr_support.link import Connection, RemoteError, SocketServer, decode, encode
 from xarm_teleop.teleop import bind_controller, choose_controller
 from vr_support.core import TeleopConfig, RelativeTeleop, VRFrame
 from vr_support.runtime import CONFIG_DIR
@@ -233,32 +233,34 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNone(self.service.lease)
         self.assertEqual(self.service.last_stop["reason"], "simulation time limit")
 
-    def test_explicit_episode_reset_saves_then_resets_and_starts_recording(self):
+    def episode_event(self, sequence):
+        obs = self.call("observation")
+        return self.call("command", {"ticket": obs["ticket"], "sequence": sequence, "events": ["episode"],
+                                     "actions": {"right": {"hold_arm": True, "hold_gripper": True}}})
+
+    def test_episode_event_saves_then_resets_and_restarts_recording(self):
         self.call("episode/start", {"task": "first"})
         self.command()
         self.service.tick()
-        obs = self.call("observation")
-        result = self.call("episode/new", {"ticket": obs["ticket"], "sequence": 1,
-                                          "record": True, "task": "second"})
-        self.assertNotEqual(result["lease"], self.lease)
-        self.lease = result["lease"]
+        result = self.episode_event(1)["events"]["episode"]
+        self.assertEqual(self.service.lease, self.lease)  # the same session continues
         self.assertEqual(self.backend.frame_id, 0)
         self.assertTrue(all(flags == [False, False] for flags in self.backend.active.values()))
         self.assertEqual(self.service.recorder.frames, 0)
+        self.assertIsNotNone(result["episode"])
         with h5py.File(result["previous_episode"]) as episode:
             self.assertEqual(episode.attrs["stop_reason"], "operator reset")
             self.assertEqual(episode.attrs["frames"], 1)
+        self.command(sequence=2)
 
-    def test_replayed_episode_reset_does_not_reset_again(self):
+    def test_replayed_episode_event_does_not_reset_again(self):
         obs = self.call("observation")
-        payload = {"ticket": obs["ticket"], "sequence": 0}
-        old_lease = self.lease
-        result = self.call("episode/new", payload)
+        payload = {"ticket": obs["ticket"], "sequence": 0, "events": ["episode"], "actions": {}}
+        self.call("command", payload)
         with patch.object(self.backend, "reset") as reset:
-            rejected = self.service.dispatch(self.peer, {"op": "episode/new", "lease": old_lease, "data": payload})
+            rejected = self.service.dispatch(self.peer, {"op": "command", "lease": self.lease, "data": payload})
             self.assertFalse(rejected["ok"])
             reset.assert_not_called()
-        self.assertEqual(self.service.lease, result["lease"])
 
     def test_physical_timeout_closes_backend_and_requires_manual_restart(self):
         # This is the physical-backend contract; no SDK/ROS connection is opened.
@@ -279,20 +281,22 @@ class ServiceTests(unittest.TestCase):
         physical.close.assert_called_once()
 
     def test_b_reset_never_resets_a_physical_backend(self):
-        physical = types.SimpleNamespace(kind="ros", done={"right": False},
+        physical = types.SimpleNamespace(kind="ros", done={"right": False}, names=("right",), frame_id=0,
             snapshot=lambda: {}, hold=lambda: None, describe=lambda: {"backend": "ros"},
-            close=unittest.mock.Mock(), reset=unittest.mock.Mock())
+            close=unittest.mock.Mock(), reset=unittest.mock.Mock(), apply=unittest.mock.Mock())
         service = ControlService(physical, self.temp.name)
         peer = object()
         lease = service.dispatch(peer, {"op": "claim"})["result"]["lease"]
-        result = service.dispatch(peer, {"op": "episode/new", "lease": lease})
+        ticket = service.dispatch(peer, {"op": "observation", "lease": lease})["result"]["ticket"]
+        result = service.dispatch(peer, {"op": "command", "lease": lease, "data": {
+            "ticket": ticket, "sequence": 0, "actions": {}, "events": ["episode"]}})
         self.assertFalse(result["ok"])
         self.assertIn("simulation-only", result["error"])
         physical.reset.assert_not_called()
         physical.close.assert_called_once()
         service.close()
 
-    def test_real_client_updates_its_lease_after_explicit_episode_reset(self):
+    def test_client_keeps_its_lease_across_an_episode_event(self):
         self.call("stop")
         peer = object()
         def request(message):
@@ -304,12 +308,12 @@ class ServiceTests(unittest.TestCase):
         client.connection = types.SimpleNamespace(request=request, close=lambda: None)
         client.claim()
         old = client.lease
-        client.new_episode(client.observation())
-        self.assertNotEqual(client.lease, old)
+        result = client.command(client.observation(), {}, events=["episode"], buttons={"B": 1.0})
+        self.assertTrue(result["events"]["episode"]["reset"])
+        self.assertEqual(client.lease, old)
         self.assertEqual(client.lease, self.service.lease)
-        self.assertEqual(client.sequence, 0)
         result = client.command(client.observation(), {})
-        self.assertEqual(result["accepted"], 1)
+        self.assertEqual(result["accepted"], 2)
         client.stop()
 
     def test_source_age_and_invalid_second_arm_fail_as_one_transaction(self):

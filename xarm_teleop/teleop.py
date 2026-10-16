@@ -1,4 +1,4 @@
-"""Quest -> ROS-free server. The server can own a simulated or physical robot."""
+"""Quest client for the VR link. The server is the simulator or manipulation_env's QuestAgent."""
 from __future__ import annotations
 
 import argparse
@@ -10,9 +10,8 @@ import numpy as np
 
 from vr_support.core import RelativeTeleop, TeleopConfig, VRFrame, valid_transform
 from vr_support.oculus import AdbOculusSource
+from vr_support.link import DEFAULT_ENDPOINT, ControlClient
 from vr_support.runtime import CONFIG_DIR, load_yaml
-from .client import ControlClient
-from .transport import DEFAULT_ENDPOINT
 
 
 class ControllerInputError(RuntimeError):
@@ -53,6 +52,14 @@ def demo_frame(sequence, now, elapsed):
                    {"LG": float(0.5 <= phase < 2), "RG": float(0.5 <= phase < 2),
                     "LTr": float(2.5 <= phase < 2.7), "RTr": float(2.5 <= phase < 2.7),
                     "X": 0.0, "A": 0.0, "Y": 0.0, "B": 0.0})
+
+
+def raw_buttons(frame):
+    """Controller values sent with each command, for logging on the robot side."""
+    if frame is None:
+        return {}
+    return {name: float(value) for name, value in frame.buttons.items()
+            if isinstance(value, (int, float)) and np.isfinite(value)}
 
 
 def input_pause_reason(frame, policies, now):
@@ -102,7 +109,7 @@ def main(argv=None):
     parser.add_argument("--execute", action="store_true", help="Allow commands to a real robot server")
     parser.add_argument("--no-gripper", action="store_true")
     parser.add_argument("--show-input", action="store_true")
-    parser.add_argument("--record", action="store_true", help="Record this run as one episode on the server")
+    parser.add_argument("--record", action="store_true", help="Simulation only: record HDF5 episodes on the server")
     parser.add_argument("--task", default="")
     parser.add_argument("--seconds", type=float)
     args = parser.parse_args(argv)
@@ -155,11 +162,11 @@ def main(argv=None):
                     "vr_config": cfg, "controller_bindings": bindings}
         if args.record:
             print(client.record(args.task, metadata))
-        print("Side grip: hold to move. Front trigger: hold to close, release to open. B/Y: new simulation episode.")
+        print("Side grip: hold to move. Front trigger: hold to close, release to open. B/Y: episode event.")
         print("Release controls before moving. Old or missing samples hold motion, then re-tare. Ctrl+C ends the session.")
         sequence = 0
         episode_pressed = None
-        tracking_paused = False
+        tracking_paused = None  # the reason motion is paused, or None
         last_control_at = None
         stale_timeout = min(p.config.stale_timeout_s for p in policies.values())
         started = last_print = time.monotonic()
@@ -178,33 +185,39 @@ def main(argv=None):
                 now = time.monotonic()
                 frame = demo_frame(sequence, now, now - started)
             pause_reason = input_pause_reason(frame, policies, now)
+            if pause_reason is None and not obs.get("enabled", True):
+                # The robot side is not executing (agent inactive, node not ready).
+                # Hold and re-tare when it resumes, so the arm cannot jump.
+                pause_reason = f"Robot side is not executing: {obs.get('status') or 'disabled'}"
             loop_delayed = last_control_at is not None and now - last_control_at > stale_timeout
             last_control_at = now
             if pause_reason:
-                if not tracking_paused:
+                if pause_reason != tracking_paused:
                     print(f"[Quest] {pause_reason}; holding all arms and grippers.")
-                tracking_paused = True
+                tracking_paused = pause_reason
                 client.command(obs, {name: {"hold_arm": True, "hold_gripper": True} for name in names},
-                               0, frame.sequence if frame else -1)
+                               0, frame.sequence if frame else -1, buttons=raw_buttons(frame))
                 time.sleep(max(0, description["dt"] - (time.monotonic() - before)))
                 continue
             if tracking_paused or loop_delayed:
                 # Discard motion during the gap. A held side grip starts from
                 # the current TCP; the gripper still needs release then press.
                 policies = {name: RelativeTeleop(p.config, allow_held_grip=True) for name, p in policies.items()}
-                tracking_paused = False
+                tracking_paused = None
                 episode_pressed = None  # Ignore B/Y presses made while tracking was absent.
                 print("[Quest] fresh input; motion re-tared. Release and press the trigger to use the gripper.")
             pressed = any(frame.buttons[p.config.episode_button] >= p.config.button_threshold for p in policies.values())
             if episode_pressed is None:
                 episode_pressed = pressed  # A button already held at startup is not a new press.
             if pressed and not episode_pressed:
-                result = client.new_episode(obs, args.task, metadata, record=args.record,
-                                            source_age_s=max(0, time.monotonic() - frame.captured_at),
-                                            source_sequence=frame.sequence)
-                print(f"[episode] reset by operator; recording={result.get('episode')}")
+                # The event rides on a hold, so it shares the command's ticket and
+                # freshness checks. The robot side decides what an episode press means.
+                result = client.command(obs, {name: {"hold_arm": True, "hold_gripper": True} for name in names},
+                                        max(0, time.monotonic() - frame.captured_at), frame.sequence,
+                                        events=["episode"], buttons=raw_buttons(frame))
+                print(f"[episode] event sent; server: {result.get('events')}")
                 # Keep the selected physical hand, but discard all previous pose
-                # origins and require a fresh grip/trigger release after reset.
+                # origins and require a fresh grip/trigger release after the event.
                 policies = {name: RelativeTeleop(p.config) for name, p in policies.items()}
                 episode_pressed = True
                 continue
@@ -223,7 +236,7 @@ def main(argv=None):
             # Only motion commands carry source age; holds do not use the pose.
             moving = any(a.get("pose") is not None or a.get("gripper") is not None for a in actions.values())
             age = max(0, time.monotonic() - frame.captured_at) if moving and frame else 0
-            client.command(obs, actions, age, frame.sequence if frame else -1)
+            client.command(obs, actions, age, frame.sequence if frame else -1, buttons=raw_buttons(frame))
             if args.show_input and now - last_print >= 1:
                 print({"source_age_s": time.monotonic() - frame.captured_at, "buttons": dict(frame.buttons),
                        "tcp": {name: state["tcp_pose"] for name, state in obs["arms"].items()}})
