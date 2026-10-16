@@ -25,5 +25,5 @@ if ! uv run xarm-client health --server "$endpoint" >/dev/null 2>&1; then
     echo "[run] waiting for run_env's Quest agent on $endpoint (onrobot_rl_env: ./scripts/run_env.sh)"
     until uv run xarm-client health --server "$endpoint" >/dev/null 2>&1; do sleep 1; done
 fi
-echo "[run] robot side is up; press [a] in run_env if the client says the agent is inactive"
+echo "[run] robot side is up; press A/X to start a demo, or [a] in run_env to drive without recording"
 exec uv run xarm-vr --server "$endpoint" --arm "$arm" --execute --show-input "$@"

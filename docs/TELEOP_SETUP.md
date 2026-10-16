@@ -18,7 +18,8 @@ Quest 3 ──USB/adb──► xarm-vr (host, uv)                      quest_tel
 
 - **xarm-vr** owns everything VR-specific: ADB, the Quest app, taring on each
   grip press, scaling, axis and button mapping. It sends absolute TCP targets,
-  gripper pulses, button values and named events (B/Y = `episode`).
+  gripper pulses, button values and named events (A/X = `episode`, long
+  B/Y = `discard`).
 - **QuestAgent** is the robot side. It serves the VR link, executes the newest
   fresh command each control tick, holds otherwise, and tells the client
   whether it is executing. While it is not (agent inactive, arm node not
@@ -86,15 +87,17 @@ Three terminals. Start the robot side first; the client waits for it.
 # 1. Arm node (settings from roamlab.yaml)
 cd ~/experiments/onrobot_rl_env && ./scripts/arm.sh left
 
-# 2. run_env with the Quest agent; press [a] in it to start the arm streams
+# 2. run_env with the Quest agent
 cd ~/experiments/onrobot_rl_env && ./scripts/run_env.sh
 
 # 3. Quest client: turns the proximity sensor off, then connects
 cd ~/experiments/quest_teleop && ./run_robot.sh
 ```
 
-Before pressing `[a]`, the client prints `Robot side is not executing: agent
-inactive` and holds. `[a]` calls `xarm_start_control` on the node. The node
+Until the agent starts, the client prints `Robot side is not executing: agent
+inactive` and holds. Press A/X on the controller to start a demo (this starts
+the agent), or `[a]` in run_env to drive without recording. Starting the agent
+calls `xarm_start_control` on the node. The node
 refuses if the arm is outside its workspace bounds or reports a fault, and
 never moves the arm to a start pose by itself.
 
@@ -127,11 +130,18 @@ and tracks on a stand. This is the same `prox_close` broadcast that MQDH sends.
 | Move the arm | Hold the side grip. Each press re-zeros against the current TCP. |
 | Close / open the gripper | Hold / release the front trigger. |
 | Hold the arm | Release the side grip. |
-| Episode event | B (right controller) or Y (left). The simulator resets; run_env does not act on it yet. |
+| Start a demo, or stop and save it | Press A (right controller) or X (left) |
+| Discard the latest demo | Hold B or Y for 1 s: discards the demo being recorded, or the last saved one when idle |
+
+The headset buttons go to the same handlers as run_env's keys. A/X starts the
+agent if needed, so you do not have to press `[a]` first. After a stop or a
+discard the agent stays active, so you can keep moving the arm to reset the
+scene. The arm holds while A/X/B/Y is pressed; after a press, release the grip
+before moving again. The hold time is `discard_hold_s` in `quest3.yaml`.
 
 run_env keys: `[a]` start the agent (arm streams), `[b]` start recording a demo
-(also starts the agent), `[c]` stop and save the demo, Backspace delete the last
-demo, `[q]` quit.
+(also starts the agent), `[c]` stop the agent and save the demo, Backspace
+delete the last demo (asks y/n), `[q]` quit.
 
 ## 5. Simulator
 
@@ -142,7 +152,8 @@ cd ~/experiments/quest_teleop
 ./run_sim.sh right --demo --seconds 5    # no headset
 ```
 
-B/Y saves the current HDF5 episode, resets the scene and starts the next one.
+A/X saves the current HDF5 episode, resets the scene and starts the next one.
+Holding B/Y does nothing in the simulator.
 Server output goes to `server.log`. See the [README](../README.md) for the
 simulator, the HDF5 format and the Gymnasium environment.
 
@@ -167,7 +178,7 @@ the arm node's speed limits are in `roamlab.yaml`.
 | `unauthorized` | USB debugging not accepted | Put the headset on and accept |
 | Session ends with `ADB log stream ended` | USB link dropped | Check the cable; `journalctl -kf \| grep usb` |
 | `APK reports no tracked controllers` while starting | Controllers asleep or out of view | Wake the controller and keep it in view |
-| Client holds: `agent inactive` | run_env agent not started | Press `[a]` (or `[b]`) in run_env |
+| Client holds: `agent inactive` | run_env agent not started | Press A/X on the controller, or `[a]` in run_env |
 | Client holds: `arm stream is not running` / `no recent xarm_state feedback` | Arm node stopped, not started, or faulted | Check the node terminal; restart `./scripts/arm.sh` and press `[a]` |
 | `Could not start the arm streams` in run_env | Node refused start: outside workspace or robot error | Move the arm inside the bounds or clear the error, then `[a]` |
 | `run_robot.sh` keeps waiting for the agent | run_env not running, or its config is not `quest` | `./scripts/run_env.sh` |
@@ -186,8 +197,7 @@ ros2 topic hz /left_arm/xarm_command_pose     # about 20 Hz while run_env's agen
 
 ## 8. Open items
 
-- Wire the VR `episode` event to run_env's episode controls (start, save,
-  discard), and settle the training data format.
+- Settle the training data format for the recorded demos.
 - The right arm has a DITTO hand, not a gripper; there is no Quest config for it.
 - Rebuild the container image to pick up `click` (`docker_ros/build.sh`).
 

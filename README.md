@@ -32,7 +32,7 @@ Keep the approach small:
   controller at startup; never switch hands during the session.
 - Each side-grip press tares controller pose against the current arm TCP.
   Apply relative movement only while held. Front trigger closes the gripper;
-  release opens it. B/Y explicitly resets the simulation episode.
+  release opens it. A/X explicitly resets the simulation episode.
 - Missing poses or samples older than 0.25 seconds hold all selected arms and
   grippers. Keep the client and episode open. Re-tare on the first fresh input,
   without a recovery timer or replaying movement from the gap.
@@ -127,8 +127,8 @@ you already opened the app and want the client to attach without launching it.
 In both cases, the client force-stops the app when the client exits.
 
 5. Release the side grip and front trigger. Hold the side grip to move the arm.
-   Hold the front trigger to close the gripper; release it to open. Press B to
-   reset the simulation and start a new episode. A left controller uses Y.
+   Hold the front trigger to close the gripper; release it to open. Press A to
+   reset the simulation and start a new episode. A left controller uses X.
 6. To stop, press Ctrl+C in Terminal 2, then Terminal 1. A closed ADB connection
    also ends the session. The client stops robot control first, then stops
    the Quest app. Old samples or a tracking gap hold motion and wait for the
@@ -137,7 +137,7 @@ In both cases, the client force-stops the app when the client exits.
 The client also stops the app after a startup error or when `--seconds` ends.
 If the USB connection is lost, it reports that app cleanup failed. Close the
 app on the headset in that case. A forced process kill (`kill -9`) cannot run
-this cleanup. Pressing B/Y resets the simulation; it leaves the Quest app running.
+this cleanup. Pressing A/X resets the simulation; it leaves the Quest app running.
 
 For a software-only test without a headset, use this client instead:
 
@@ -243,13 +243,14 @@ Default controls:
 | Close gripper | Hold front trigger (`LTr`) | Hold front trigger (`RTr`) |
 | Open gripper | Release front trigger | Release front trigger |
 | Hold the arm | Release grip | Release grip |
-| Reset simulation and start a new episode | Y | B |
+| Reset simulation and start a new episode | X | A |
+| Discard (robot only; ignored by the simulator) | Hold Y | Hold B |
 
 **Each press sets a new zero point.** The client captures the controller pose and
 the arm TCP pose at that press. It then applies only the controller's relative
 movement. Release, reposition your hand, and press again to set a new reference.
 
-B/Y is edge-triggered: holding it causes one reset, not repeated resets. It must
+A/X is edge-triggered: holding it causes one reset, not repeated resets. It must
 be released before another reset can occur. After reset, release the side grip
 and front trigger before using them. The controller selection remains fixed.
 The scene resets with the server's `--seed`, so reset does not choose a new seed.
@@ -280,7 +281,7 @@ Motion made during the gap is discarded. The controller-to-arm mapping never
 changes during a session, including with `--controller auto`.
 
 The gripper holds its position through tracking loss and recovery. Release the
-front trigger, then press it again to use the gripper. A B/Y press made during
+front trigger, then press it again to use the gripper. A A/X press made during
 the gap cannot start a new episode. With both arms selected, both controllers
 must recover before either arm can move.
 
@@ -306,7 +307,7 @@ It reports the actual sample age and limit when old data pauses motion. `--show-
 also shows the actual age while the controls are released.
 
 Simulation physics pauses when no client owns control. Interactive simulation
-has no 60-second cutoff and does not end when the cube is lifted. B/Y is the
+has no 60-second cutoff and does not end when the cube is lifted. A/X is the
 explicit new-episode/reset action. After a fault, restart the client yourself;
 it must see released controls before accepting motion.
 
@@ -335,7 +336,8 @@ session explicitly; stopping a recording does not leave motion running between f
 The real arms are driven by `run_env`'s Quest agent in `onrobot_rl_env`, not by
 `xarm-server`. Start the arm node and run_env there, then `./run_robot.sh` here.
 [docs/TELEOP_SETUP.md](docs/TELEOP_SETUP.md) has the full guide. On the robot,
-B/Y sends an `episode` event to run_env instead of resetting a simulation.
+A/X starts a demo or stops and saves it, and holding A/X for 1 s discards the
+latest demo. See the guide.
 
 ## Record demonstrations
 
@@ -347,10 +349,10 @@ uv run xarm-server --arm right --viewer --episodes ./episodes
 uv run xarm-vr --arm right --controller auto --record --task "Pick up the cube" --show-input
 ```
 
-The first recording starts when the client obtains control. Each B/Y press ends
+The first recording starts when the client obtains control. Each A/X press ends
 the current recording **before** reset and starts a new file **after** reset.
 Ctrl+C or a fault saves the current file and stops; neither starts another file.
-Without `--record`, B/Y still resets the simulation but creates no dataset file.
+Without `--record`, A/X still resets the simulation but creates no dataset file.
 
 Files are written as `.partial.h5` while recording, then renamed to `.h5` after
 a normal stop, disconnect, or timeout. Check `success`, `stop_reason`, `frames`,

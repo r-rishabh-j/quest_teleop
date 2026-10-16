@@ -30,7 +30,8 @@ def bind_controller(config, controller):
     return replace(config, controller=controller,
                    move_button=mapping.get(config.move_button, config.move_button),
                    gripper_button=mapping.get(config.gripper_button, config.gripper_button),
-                   episode_button=mapping.get(config.episode_button, config.episode_button))
+                   episode_button=mapping.get(config.episode_button, config.episode_button),
+                   discard_button=mapping.get(config.discard_button, config.discard_button))
 
 
 def choose_controller(available, preferred):
@@ -52,6 +53,44 @@ def demo_frame(sequence, now, elapsed):
                    {"LG": float(0.5 <= phase < 2), "RG": float(0.5 <= phase < 2),
                     "LTr": float(2.5 <= phase < 2.7), "RTr": float(2.5 <= phase < 2.7),
                     "X": 0.0, "A": 0.0, "Y": 0.0, "B": 0.0})
+
+
+class EventButtons:
+    """Operator events from the face buttons of the bound controllers.
+
+    A press of an episode button sends "episode"; holding a discard button for
+    discard_hold_s sends "discard" once per hold. A button already down at
+    startup or after an input gap is not a press.
+    """
+
+    def __init__(self, configs):
+        self.configs = list(configs)
+        self.hold_s = max(c.discard_hold_s for c in self.configs)
+        self.reset()
+
+    def reset(self):
+        self._episode_down = None
+        self._discard_since = None
+        self._discard_sent = True  # a hold already in progress cannot discard
+
+    def update(self, frame, now):
+        """Returns (events, held): held is True while any event button is down."""
+        def down(attr):
+            return any(frame.buttons[getattr(c, attr)] >= c.button_threshold for c in self.configs)
+        episode, discard = down("episode_button"), down("discard_button")
+        events = []
+        if self._episode_down is not None and episode and not self._episode_down:
+            events.append("episode")
+        self._episode_down = episode
+        if not discard:
+            self._discard_since, self._discard_sent = None, False
+        else:
+            if self._discard_since is None:
+                self._discard_since = now
+            if not self._discard_sent and now - self._discard_since >= self.hold_s:
+                events.append("discard")
+                self._discard_sent = True
+        return events, episode or discard
 
 
 def raw_buttons(frame):
@@ -86,7 +125,7 @@ def input_pause_reason(frame, policies, now):
             valid_transform(frame.poses[config.controller])
         except (ValueError, TypeError) as exc:
             raise ControllerInputError(f"Invalid {name} controller pose; stopping all arms and grippers") from exc
-        required = [config.move_button, config.episode_button]
+        required = [config.move_button, config.episode_button, config.discard_button]
         if config.gripper_enabled:
             required.append(config.gripper_button)
         for button in required:
@@ -153,20 +192,26 @@ def main(argv=None):
                 policies[name] = RelativeTeleop(bind_controller(config, controller))
         bindings = {name: {"controller": policy.config.controller, "move_button": policy.config.move_button,
                            "gripper_button": policy.config.gripper_button,
-                           "episode_button": policy.config.episode_button} for name, policy in policies.items()}
+                           "episode_button": policy.config.episode_button,
+                           "discard_button": policy.config.discard_button} for name, policy in policies.items()}
         for name, binding in bindings.items():
-            print(f"[Quest] robot={name}; controller={binding['controller']}; "
-                  f"move={binding['move_button']}; gripper={binding['gripper_button']}; new episode={binding['episode_button']}")
+            print(f"[Quest] robot={name}; controller={binding['controller']}; move={binding['move_button']}; "
+                  f"gripper={binding['gripper_button']}; episode={binding['episode_button']}; "
+                  f"discard={binding['discard_button']} (hold)")
         description = client.claim(allow_real=args.execute)
         metadata = {"source": "synthetic" if args.demo else "quest", "selected_arms": list(names),
                     "vr_config": cfg, "controller_bindings": bindings}
         if args.record:
             print(client.record(args.task, metadata))
-        print("Side grip: hold to move. Front trigger: hold to close, release to open. B/Y: episode event.")
+        print("Side grip: hold to move. Front trigger: hold to close, release to open.")
+        print("A/X: start an episode, or stop and save it. Hold B/Y: discard the latest episode.")
         print("Release controls before moving. Old or missing samples hold motion, then re-tare. Ctrl+C ends the session.")
         sequence = 0
-        episode_pressed = None
+        event_buttons = EventButtons(p.config for p in policies.values())
+        hold_all = {name: {"hold_arm": True, "hold_gripper": True} for name in names}
         tracking_paused = None  # the reason motion is paused, or None
+        event_was_held = False
+        stale_after_hold = False  # policies skipped updates during a hold that sent no event
         last_control_at = None
         stale_timeout = min(p.config.stale_timeout_s for p in policies.values())
         started = last_print = time.monotonic()
@@ -184,19 +229,40 @@ def main(argv=None):
             else:
                 now = time.monotonic()
                 frame = demo_frame(sequence, now, now - started)
-            pause_reason = input_pause_reason(frame, policies, now)
-            if pause_reason is None and not obs.get("enabled", True):
-                # The robot side is not executing (agent inactive, node not ready).
-                # Hold and re-tare when it resumes, so the arm cannot jump.
-                pause_reason = f"Robot side is not executing: {obs.get('status') or 'disabled'}"
+            input_reason = input_pause_reason(frame, policies, now)
             loop_delayed = last_control_at is not None and now - last_control_at > stale_timeout
             last_control_at = now
-            if pause_reason:
-                if pause_reason != tracking_paused:
-                    print(f"[Quest] {pause_reason}; holding all arms and grippers.")
-                tracking_paused = pause_reason
-                client.command(obs, {name: {"hold_arm": True, "hold_gripper": True} for name in names},
-                               0, frame.sequence if frame else -1, buttons=raw_buttons(frame))
+            if input_reason:
+                # Presses made while input is missing or old are ignored.
+                event_buttons.reset()
+                if input_reason != tracking_paused:
+                    print(f"[Quest] {input_reason}; holding all arms and grippers.")
+                tracking_paused = input_reason
+                client.command(obs, hold_all, 0, frame.sequence if frame else -1, buttons=raw_buttons(frame))
+                time.sleep(max(0, description["dt"] - (time.monotonic() - before)))
+                continue
+            events, event_held = event_buttons.update(frame, now)
+            if events:
+                # Events ride on a hold, so they share the command's ticket and
+                # freshness checks. They are sent even while the robot side is
+                # not executing: A/X is how an episode (and the agent) starts.
+                result = client.command(obs, hold_all, max(0, time.monotonic() - frame.captured_at),
+                                        frame.sequence, events=events, buttons=raw_buttons(frame))
+                print(f"[Quest] sent {', '.join(events)}; server: {result.get('events')}")
+                # Keep the selected physical hand, but discard all previous pose
+                # origins and require a fresh grip/trigger release after the event.
+                policies = {name: RelativeTeleop(p.config) for name, p in policies.items()}
+                event_was_held, stale_after_hold = True, False
+                time.sleep(max(0, description["dt"] - (time.monotonic() - before)))
+                continue
+            if not obs.get("enabled", True):
+                # The robot side is not executing (agent inactive, node not ready).
+                # Hold and re-tare when it resumes, so the arm cannot jump.
+                reason = f"Robot side is not executing: {obs.get('status') or 'disabled'}"
+                if reason != tracking_paused:
+                    print(f"[Quest] {reason}; holding all arms and grippers.")
+                tracking_paused = reason
+                client.command(obs, hold_all, 0, frame.sequence, buttons=raw_buttons(frame))
                 time.sleep(max(0, description["dt"] - (time.monotonic() - before)))
                 continue
             if tracking_paused or loop_delayed:
@@ -204,27 +270,18 @@ def main(argv=None):
                 # the current TCP; the gripper still needs release then press.
                 policies = {name: RelativeTeleop(p.config, allow_held_grip=True) for name, p in policies.items()}
                 tracking_paused = None
-                episode_pressed = None  # Ignore B/Y presses made while tracking was absent.
                 print("[Quest] fresh input; motion re-tared. Release and press the trigger to use the gripper.")
-            pressed = any(frame.buttons[p.config.episode_button] >= p.config.button_threshold for p in policies.values())
-            if episode_pressed is None:
-                episode_pressed = pressed  # A button already held at startup is not a new press.
-            if pressed and not episode_pressed:
-                # The event rides on a hold, so it shares the command's ticket and
-                # freshness checks. The robot side decides what an episode press means.
-                result = client.command(obs, {name: {"hold_arm": True, "hold_gripper": True} for name in names},
-                                        max(0, time.monotonic() - frame.captured_at), frame.sequence,
-                                        events=["episode"], buttons=raw_buttons(frame))
-                print(f"[episode] event sent; server: {result.get('events')}")
-                # Keep the selected physical hand, but discard all previous pose
-                # origins and require a fresh grip/trigger release after the event.
-                policies = {name: RelativeTeleop(p.config) for name, p in policies.items()}
-                episode_pressed = True
-                continue
-            episode_pressed = pressed
+            if event_held and not event_was_held:
+                stale_after_hold = True
+            if stale_after_hold and not event_held:
+                # The policies were not updated while an event button was down.
+                # Restart them; a held grip re-tares at the current TCP.
+                policies = {name: RelativeTeleop(p.config, allow_held_grip=True) for name, p in policies.items()}
+                stale_after_hold = False
+            event_was_held = event_held
             actions = {}
             for name, policy in policies.items():
-                if pressed:
+                if event_held:
                     actions[name] = {"hold_arm": True, "hold_gripper": True}
                     continue
                 state = obs["arms"][name]

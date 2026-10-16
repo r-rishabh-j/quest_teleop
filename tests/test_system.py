@@ -33,9 +33,10 @@ class ControllerBindingTests(unittest.TestCase):
             np.testing.assert_array_equal(bound.vr_to_robot, config.vr_to_robot)
 
     def test_custom_button_roles_follow_the_selected_hand(self):
-        bound = bind_controller(TeleopConfig(move_button="RTr", gripper_button="B", episode_button="A"), "l")
+        bound = bind_controller(TeleopConfig(move_button="RTr", gripper_button="B", episode_button="A",
+                                             discard_button="RG"), "l")
         self.assertEqual((bound.move_button, bound.gripper_button), ("LTr", "Y"))
-        self.assertEqual(bound.episode_button, "X")
+        self.assertEqual((bound.episode_button, bound.discard_button), ("X", "LG"))
 
     def test_two_available_controllers_keep_configured_preference(self):
         self.assertEqual(choose_controller(["l", "r"], "r"), "r")

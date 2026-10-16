@@ -18,18 +18,18 @@ from vr_support.link import ControlClient, Peer, RemoteError, SocketServer, enco
 POSE = [0.4, 0.0, 0.3, 0.0, 3.14, 0.0]
 
 
-def vr_frame(sequence, grip=0, trigger=0, episode=0, hands=("r",), x=0):
+def vr_frame(sequence, grip=0, trigger=0, episode=0, hands=("r",), x=0, discard=0):
     poses = {hand: np.eye(4) for hand in hands}
     for pose in poses.values():
         pose[0, 3] = x
-    return VRFrame(sequence, 100.0, poses, {"RG": grip, "RTr": trigger, "B": episode,
-                                          "LG": 0, "LTr": 0, "Y": 0})
+    return VRFrame(sequence, 100.0, poses, {"RG": grip, "RTr": trigger, "A": episode, "B": discard,
+                                          "LG": 0, "LTr": 0, "X": 0, "Y": 0})
 
 
 class FakeClient:
     def __init__(self, names):
         self.names = names
-        self.commands, self.resets, self.stops, self.buttons = [], [], [], []
+        self.commands, self.resets, self.stops, self.buttons, self.events = [], [], [], [], []
         self.pose = list(POSE)
         self.lease = None
         self.enabled = True
@@ -49,6 +49,7 @@ class FakeClient:
     def command(self, obs, actions, *args, events=(), buttons=None):
         self.commands.append(deepcopy(actions))
         self.buttons.append(buttons)
+        self.events.extend(events)
         if "episode" in events:
             # Like the simulator: an episode event resets the scene.
             self.resets.append(len(self.commands) - 1)
@@ -94,8 +95,10 @@ class TeleopControlsTests(unittest.TestCase):
         source.error = None
         # Operator gain tuning must not change the geometry expected by these tests.
         config = {"defaults": {"translation_scale": 0.5}, "arms": {
-            "left": {"controller": "l", "move_button": "LG", "gripper_button": "LTr", "episode_button": "Y"},
-            "right": {"controller": "r", "move_button": "RG", "gripper_button": "RTr", "episode_button": "B"},
+            "left": {"controller": "l", "move_button": "LG", "gripper_button": "LTr",
+                     "episode_button": "X", "discard_button": "Y"},
+            "right": {"controller": "r", "move_button": "RG", "gripper_button": "RTr",
+                      "episode_button": "A", "discard_button": "B"},
         }}
         with ExitStack() as stack:
             stack.enter_context(patch.object(teleop, "load_yaml", return_value=config))
@@ -184,7 +187,7 @@ class TeleopControlsTests(unittest.TestCase):
         self.assertIsNone(client.commands[4]["right"]["gripper"])
         np.testing.assert_allclose(client.commands[6]["right"]["pose"], POSE)
         self.assertEqual(client.commands[6]["right"]["gripper"], 0)
-        self.assertEqual(client.buttons[2]["B"], 1)
+        self.assertEqual(client.buttons[2]["A"], 1)
 
     def test_disabled_robot_side_holds_then_retares_without_jumping(self):
         client = FakeClient(["right"])
@@ -198,6 +201,24 @@ class TeleopControlsTests(unittest.TestCase):
         # On resume the held grip re-tares at the current TCP: no jump to x=1.0.
         np.testing.assert_allclose(client.commands[4]["right"]["pose"], POSE)
         np.testing.assert_allclose(client.commands[5]["right"]["pose"][1], POSE[1] - 0.5 * 0.1, atol=1e-9)
+
+    def test_long_discard_press_sends_one_discard_and_short_press_none(self):
+        times = [100.0 + 0.2 * i for i in range(13)]
+        held = [0] + [1] * 7 + [0] + [1, 1] + [0, 0]  # released, 1.2 s hold, release, 0.4 s hold
+        frames = [replace(vr_frame(i + 1, discard=d), captured_at=t) for i, (t, d) in enumerate(zip(times, held))]
+        client = self.run_timed_frames(frames)
+        self.assertEqual(client.events, ["discard"])
+        self.assertEqual(client.resets, [])
+        # The arm holds while the discard button is down.
+        self.assertEqual(client.commands[2]["right"], {"hold_arm": True, "hold_gripper": True})
+
+    def test_episode_press_is_sent_while_robot_side_is_inactive(self):
+        client = FakeClient(["right"])
+        client.enabled = False
+        self.run_frames([vr_frame(1), vr_frame(2, episode=1), vr_frame(3)], client=client)
+        self.assertEqual(client.events, ["episode"])
+        for action in client.commands:
+            self.assertEqual(action["right"], {"hold_arm": True, "hold_gripper": True})
 
     def test_b_already_held_at_start_does_not_reset(self):
         client = self.run_frames([vr_frame(1, episode=1), vr_frame(2, episode=1), vr_frame(3)])
