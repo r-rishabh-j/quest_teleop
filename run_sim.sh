@@ -26,12 +26,7 @@ done
 command -v uv >/dev/null || { echo "uv not found; install it first" >&2; exit 1; }
 
 if ! $demo; then
-    command -v adb >/dev/null || { echo "adb not found: sudo apt install adb" >&2; exit 1; }
-    state=$(adb get-state 2>&1 || true)
-    if [[ $state != device ]]; then
-        echo "Quest is not ready over USB (adb: $state). Check 'adb devices'." >&2
-        exit 1
-    fi
+    ./quest_prep.sh  # headset checks and proximity sensor off
 fi
 
 socket=/tmp/xarm-teleop-$(id -u).sock
